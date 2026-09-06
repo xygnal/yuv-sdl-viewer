@@ -81,6 +81,8 @@ const SDL_VideoInfo* info = NULL;
 Uint32 FORMAT = YV12;
 FILE* fd;
 
+unsigned int msec_per_frm = 33;
+
 struct my_msgbuf {
     long mtype;
     char mtext[2];
@@ -122,6 +124,12 @@ struct param {
     int msqid;
     key_t key;
     FILE* fd2;                /* diff file */
+
+    int sz_file_hdr;
+    int sz_frm_hdr;
+    int sz_diff_file_hdr;
+    int sz_diff_frm_hdr;
+    int bytes_pel;
 };
 
 /* Global parameter struct */
@@ -482,6 +490,8 @@ void draw_frame(void)
 
 Uint32 read_frame(void)
 {
+    fseek(fd, P.sz_frm_hdr, SEEK_CUR);
+
     if (!P.diff) {
         return (*reader[FORMAT])();
     } else {
@@ -523,6 +533,7 @@ Uint32 diff_mode(void)
     fd_tmp = fd;
     fd = P.fd2;
 
+    fseek(fd, P.sz_diff_frm_hdr, SEEK_CUR);
     if (!(*reader[FORMAT])()) {
         free(y_tmp);
         fd = fd_tmp;
@@ -670,9 +681,9 @@ void check_input(void)
     /* Even number of frames? */
     fseek(fd, 0L, SEEK_END);
     file_size = ftell(fd);
-    fseek(fd, 0L, SEEK_SET);
+    fseek(fd, P.sz_file_hdr, SEEK_SET);
 
-    if (file_size % P.frame_size != 0) {
+    if ((file_size - P.sz_file_hdr) % (P.sz_frm_hdr + P.bytes_pel * P.frame_size) != 0) {
         fprintf(stderr, "#FRAMES not an integer, check input...\n");
     }
 }
@@ -899,8 +910,8 @@ Uint32 event_loop(void)
                             if (read_frame()) {
                                 draw_frame();
                                 /* insert delay for real time viewing */
-                                if (SDL_GetTicks() - start_ticks < 40)
-                                    SDL_Delay(40 - (SDL_GetTicks() - start_ticks));
+                                if (SDL_GetTicks() - start_ticks < msec_per_frm)
+                                    SDL_Delay(msec_per_frm - (SDL_GetTicks() - start_ticks));
                                 frame++;
                                 send_message(NEXT);
                             } else {
@@ -926,9 +937,9 @@ Uint32 event_loop(void)
                     case SDLK_LEFT: /* previous frame */
                         if (frame > 1) {
                             frame--;
-                            fseek(fd, ((frame-1) * P.frame_size), SEEK_SET);
+                            fseek(fd, P.sz_file_hdr + (frame - 1)*(P.sz_frm_hdr + P.bytes_pel * P.frame_size), SEEK_SET);
                             if (P.diff) {
-                                fseek(P.fd2, ((frame-1) * P.frame_size), SEEK_SET);
+                                fseek(P.fd2, P.sz_diff_file_hdr + (frame - 1)*(P.sz_diff_frm_hdr + P.bytes_pel * P.frame_size), SEEK_SET);
                             }
                             read_frame();
                             draw_frame();
@@ -960,9 +971,9 @@ Uint32 event_loop(void)
                     case SDLK_r: /* rewind */
                         if (frame > 1) {
                             frame = 1;
-                            fseek(fd, 0, SEEK_SET);
+                            fseek(fd, P.sz_file_hdr, SEEK_SET);
                             if (P.diff) {
-                                fseek(P.fd2, 0, SEEK_SET);
+                                fseek(P.fd2, P.sz_diff_file_hdr, SEEK_SET);
                             }
                             read_frame();
                             draw_frame();
@@ -1063,47 +1074,223 @@ Uint32 event_loop(void)
 
 Uint32 parse_input(int argc, char **argv)
 {
-    if (argc != 5 && argc != 6) {
+#define MAX_YUV4_HEADER 128
+#define MAX_FRAME_HEADER 80
+#define Y4M_MAGIC "YUV4MPEG2"
+#define Y4M_MAGIC_LEN 9 // strlen("YUV4MPEG2")
+#define MAX_Y4m_COLOR_SPACE  7
+    char y4m_header[Y4M_MAGIC_LEN + 1 + MAX_YUV4_HEADER];
+    int bytesRead = 0;
+
+    P.filename = argv[1];
+    P.sz_file_hdr = 0;
+    P.sz_frm_hdr = 0;
+    P.bytes_pel = 1;
+
+    if (argc == 5 || argc == 6) {
+        P.width = atoi(argv[2]);
+        P.height = atoi(argv[3]);
+
+        if (!strncasecmp(argv[4], "YV1210", 6)) {
+            P.overlay_format = SDL_YV12_OVERLAY;
+            FORMAT = YV1210;
+            P.bytes_pel = 2;
+        } else if (!strncasecmp(argv[4], "YV12", 4)) {
+            P.overlay_format = SDL_YV12_OVERLAY;
+            FORMAT = YV12;
+        } else if (!strncasecmp(argv[4], "IYUV", 4)) {
+            P.overlay_format = SDL_IYUV_OVERLAY;
+            FORMAT = IYUV;
+        } else if (!strncasecmp(argv[4], "YUY2", 4)) {
+            P.overlay_format = SDL_YUY2_OVERLAY;
+            FORMAT = YUY2;
+        } else if (!strncasecmp(argv[4], "UYVY", 4)) {
+            P.overlay_format = SDL_UYVY_OVERLAY;
+            FORMAT = UYVY;
+        } else if (!strncasecmp(argv[4], "YVYU", 4)) {
+            P.overlay_format = SDL_YVYU_OVERLAY;
+            FORMAT = YVYU;
+        } else if (!strncasecmp(argv[4], "Y42210", 6)) {
+            /* No support for 422, display it as YVYU */
+            P.overlay_format = SDL_YVYU_OVERLAY;
+            FORMAT = Y42210;
+            P.bytes_pel = 2;
+        } else {
+            fprintf(stderr, "The format option '%s' is not recognized\n", argv[4]);
+            return 0;
+        }
+        if (argc == 6) {
+            /* diff mode */
+            P.diff = 1;
+            P.fname_diff = argv[5];
+        }
+    } else if (argc == 2 || argc == 3) {
+        int hdr_w = 0, hdr_h = 0;
+        Uint32 clr_idx = YV12;
+        FILE *fpPrb = fopen(P.filename, "rb");
+        bytesRead = fread(y4m_header, sizeof(char), Y4M_MAGIC_LEN + 1 + MAX_YUV4_HEADER, fpPrb);
+        if (strncmp(y4m_header, Y4M_MAGIC, Y4M_MAGIC_LEN) == 0) {
+            char    interlace_inf = 'p';
+            char    *tokstart, *tokend, *header_end;
+            int     pos_1st_frm;
+            for (pos_1st_frm = 0; pos_1st_frm < bytesRead; pos_1st_frm++)
+                if (y4m_header[pos_1st_frm] == '\n') // '\n' = 0x0A
+                    break;
+            P.sz_file_hdr = pos_1st_frm + 1;
+            header_end = y4m_header + pos_1st_frm + 1;
+            for (tokstart = y4m_header + Y4M_MAGIC_LEN + 1; tokstart < header_end; tokstart++) {
+                if (*tokstart == 0x20)
+                    continue;
+                switch (*tokstart++) {
+                case 'W': // Width. Required.
+                    hdr_w    = strtol(tokstart, &tokend, 10);
+                    tokstart = tokend;
+                    break;
+                case 'H': // Height. Required.
+                    hdr_h   = strtol(tokstart, &tokend, 10);
+                    tokstart = tokend;
+                    break;
+                case 'C': // Color space
+                    for ( clr_idx = 0; clr_idx < MAX_Y4m_COLOR_SPACE; ++clr_idx) {
+                        const char *clrspace[MAX_Y4m_COLOR_SPACE] = { "420", "420jpeg", "420mpeg2", "420paldv", "420p10", "422", "422p10"}; // ignores chroma sample position
+                        const int strlen_clrID[MAX_Y4m_COLOR_SPACE][2] =  { {3,YV12},{7,YV12},{8,YV12},{8,YV12},{6,YV1210},{3,YVYU},{6,Y42210} };
+                        char *str_end_candidate = tokstart + strlen_clrID[clr_idx][0];
+                        if (strncmp(tokstart, clrspace[clr_idx], strlen_clrID[clr_idx][0]) == 0 && (*str_end_candidate == 0x20 || *str_end_candidate == '\n')) {
+                            tokstart = str_end_candidate;
+                            clr_idx = strlen_clrID[clr_idx][1];
+                            break;
+                        }
+                    }
+                    break;
+                case 'I': // Interlace type
+                    interlace_inf = *tokstart++;
+                    break;
+                case 'F': // Frame rate
+                    {
+                        int fpsNum, fpsDenom;
+                        sscanf(tokstart, "%d:%d", &fpsNum, &fpsDenom);
+                        msec_per_frm = (fpsDenom*1000 + (fpsNum>>1)) / fpsNum;
+                    }
+                    while (tokstart < header_end && *tokstart != 0x20)
+                        tokstart++;
+                    break;
+                case 'A': // Pixel aspect
+                    {
+                        int aspectn, aspectd;
+                        sscanf(tokstart, "%d:%d", &aspectn, &aspectd); // 0:0 if unknown
+                    }
+                    while (tokstart < header_end && *tokstart != 0x20)
+                        tokstart++;
+                    break;
+                case 'X': // Vendor extensions
+                    while (tokstart < header_end && *tokstart != 0x20)
+                        tokstart++;
+                    break;
+                }
+            }
+            if ( hdr_w == 0 || hdr_h == 0 || interlace_inf != 'p' || clr_idx >= MAX_Y4m_COLOR_SPACE) {
+                fprintf(stderr, "Error .y4m information  %s\n", P.filename);
+                return 0;
+            }
+            fseek(fpPrb, P.sz_file_hdr, SEEK_SET );
+            bytesRead = fread(y4m_header, sizeof(char), MAX_FRAME_HEADER, fpPrb);
+            if ( strncmp(y4m_header, "FRAME", 5) ) {
+                fprintf(stderr, "Error .y4m. FRAME is not found  %s\n", P.filename);
+                return 0;
+            }
+            for (pos_1st_frm = 0; pos_1st_frm < bytesRead; pos_1st_frm++)
+                if (y4m_header[pos_1st_frm] == '\n') // '\n' = 0x0A
+                    break;
+            P.sz_frm_hdr = pos_1st_frm + 1;
+        } else {
+            for (const char *p = P.filename; *p; ++p) {
+                int w, h;
+                if (sscanf(p, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                    hdr_w = w; hdr_h = h; break;
+                }
+            }
+            if (hdr_w == 0) {
+                const int sizeWHcand[][2] = {
+                    {3840,2160},{1920,1080},{1280,720},{960,540},{640,360},
+                    {2560,1440},{320,240},{352,240},{352,288},{176,144},
+                    {640,480},{832,480},{416,240},{720,480},{1920,1088},
+                    {2560,1600},{256,128}
+                };
+                long fsz, sel; int nc = 0, i, ws[sizeof(sizeWHcand) / sizeof(sizeWHcand[0])], hs[sizeof(sizeWHcand) / sizeof(sizeWHcand[0])];
+                fseek(fpPrb, 0, SEEK_END); fsz = ftell(fpPrb);
+                for (i = 0; i < (int)(sizeof(sizeWHcand) / sizeof(sizeWHcand[0])); i++) {
+                    long f = ((long)sizeWHcand[i][0] * sizeWHcand[i][1] * 3) >> 1;
+                    if (fsz % f == 0) {
+                        ws[nc] = sizeWHcand[i][0]; hs[nc] = sizeWHcand[i][1];
+                        printf("%d. %dx%d %ld frames YV12\n", nc + 1, ws[nc], hs[nc], fsz / f);
+                        nc++;
+                    }
+                }
+                printf("%d. manual\nselect: ", nc + 1);
+                scanf("%ld", &sel);
+                if (sel >= 1 && sel <= nc) {
+                    hdr_w = ws[sel - 1]; hdr_h = hs[sel - 1];
+                } else {
+                    const int fmt[] = {YV12, YVYU, YV1210, Y42210};
+                    printf("Width: "); scanf("%d", &hdr_w);
+                    printf("Height: "); scanf("%d", &hdr_h);
+                    printf("Color  1[YV12] 2[YVYU] 3[YV1210] 4[Y42210]: "); scanf("%ld", &sel);
+                    if ( hdr_w == 0 || hdr_h == 0 || sel > (int)(sizeof(fmt)/sizeof(fmt[0])) ) {
+                        fprintf(stderr, "Error information by user\n");
+                        return 0;
+                    }
+                    clr_idx = fmt[sel - 1];
+                }
+            }
+        }
+        fclose(fpPrb);
+
+        P.width = hdr_w;
+        P.height = hdr_h;
+        FORMAT = clr_idx;
+        P.overlay_format = ((clr_idx == YV12 || clr_idx == YV1210) ? SDL_YV12_OVERLAY : SDL_YVYU_OVERLAY);
+        if (clr_idx == YV1210 || clr_idx == Y42210)
+            P.bytes_pel = 2;
+        if (argc == 3) {
+            P.diff = 1;
+            P.fname_diff = argv[2];
+        }
+    } else {
         usage(argv[0]);
         return 0;
     }
 
-    if (argc == 6) {
-        /* diff mode */
-        P.diff = 1;
-        P.fname_diff = argv[5];
-    }
+    if (P.diff == 1) {
+        FILE *fpPrb = fopen(P.fname_diff, "rb");
+        P.sz_diff_file_hdr = 0;
+        P.sz_diff_frm_hdr = 0;
 
-    P.filename = argv[1];
+        bytesRead = fread(y4m_header, sizeof(char), Y4M_MAGIC_LEN + 1 + MAX_YUV4_HEADER, fpPrb);
+        if (strncmp(y4m_header, Y4M_MAGIC, Y4M_MAGIC_LEN) == 0) {
+            int Wdiff = 0, Hdiff = 0;
+            int pos_1st_frm;
+            for (pos_1st_frm = 0; pos_1st_frm < bytesRead; pos_1st_frm++) {
+                if (y4m_header[pos_1st_frm] == '\n')
+                    break;
+                else if (y4m_header[pos_1st_frm] == 'W')
+                    sscanf(&y4m_header[pos_1st_frm + 1], "%d", &Wdiff);
+                else if (y4m_header[pos_1st_frm] == 'H')
+                    sscanf(&y4m_header[pos_1st_frm + 1], "%d", &Hdiff);
+            }
+            P.sz_diff_file_hdr = pos_1st_frm + 1;
 
-    P.width = atoi(argv[2]);
-    P.height = atoi(argv[3]);
-
-    if (!strncmp(argv[4], "YV1210", 6)) {
-        P.overlay_format = SDL_YV12_OVERLAY;
-        FORMAT = YV1210;
-    } else if (!strncmp(argv[4], "YV12", 4)) {
-        P.overlay_format = SDL_YV12_OVERLAY;
-        FORMAT = YV12;
-    } else if (!strncmp(argv[4], "IYUV", 4)) {
-        P.overlay_format = SDL_IYUV_OVERLAY;
-        FORMAT = IYUV;
-    } else if (!strncmp(argv[4], "YUY2", 4)) {
-        P.overlay_format = SDL_YUY2_OVERLAY;
-        FORMAT = YUY2;
-    } else if (!strncmp(argv[4], "UYVY", 4)) {
-        P.overlay_format = SDL_UYVY_OVERLAY;
-        FORMAT = UYVY;
-    } else if (!strncmp(argv[4], "YVYU", 4)) {
-        P.overlay_format = SDL_YVYU_OVERLAY;
-        FORMAT = YVYU;
-    } else if (!strncmp(argv[4], "Y42210", 6)) {
-        /* No support for 422, display it as YVYU */
-        P.overlay_format = SDL_YVYU_OVERLAY;
-        FORMAT = Y42210;
-    } else {
-        fprintf(stderr, "The format option '%s' is not recognized\n", argv[4]);
-        return 0;
+            fseek(fpPrb, P.sz_diff_file_hdr, SEEK_SET );
+            bytesRead = fread(y4m_header, sizeof(char), MAX_FRAME_HEADER, fpPrb);
+            if ( Wdiff != (int)P.width || Hdiff != (int)P.height || strncmp(y4m_header, "FRAME", 5) ) {
+                fprintf(stderr, "Error diff .y4m information %s\n", P.fname_diff);
+                return 0;
+            }
+            for (pos_1st_frm = 0; pos_1st_frm < bytesRead; pos_1st_frm++)
+                if (y4m_header[pos_1st_frm] == '\n') // '\n' = 0x0A
+                    break;
+            P.sz_diff_frm_hdr = pos_1st_frm + 1;
+        }
+        fclose(fpPrb);
     }
 
     return 1;
@@ -1116,6 +1303,7 @@ Uint32 open_input(void)
         fprintf(stderr, "Error opening %s\n", P.filename);
         return 0;
     }
+    fseek(fd, P.sz_file_hdr, SEEK_SET );
 
     if (P.diff) {
         P.fd2 = fopen(P.fname_diff, "rb");
@@ -1123,6 +1311,7 @@ Uint32 open_input(void)
             fprintf(stderr, "Error opening %s\n", P.fname_diff);
             return 0;
         }
+        fseek(P.fd2, P.sz_diff_file_hdr, SEEK_SET );
     }
     return 1;
 }

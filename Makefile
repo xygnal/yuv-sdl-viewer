@@ -1,9 +1,9 @@
 DBG        = #-ggdb3
 OPTFLAGS   = -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes $(DBG) -pedantic
-SDL_LIBS   := $(shell sdl-config --static-libs)
+SDL_LIBS   := $(shell sdl-config --libs)
 SDL_CFLAGS := $(shell sdl-config --cflags)
 CFLAGS     = $(OPTFLAGS)  $(SDL_CFLAGS) -std=c99
-LDFLAGS    = $(SDL_LIBS) #-lefence
+LDFLAGS    = $(SDL_LIBS) -lm
 
 SRC        = yv.c
 TARGET     = yv

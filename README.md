@@ -1,13 +1,40 @@
-Simple YCbCr-Viewer (YUV)
-=========================
+# yuv-sdl-viewer (xygnal fork)
+
+> This repository is based on the previous repository https://github.com/figgis/yuv-viewer. Thanks to the original author [figgis](https://github.com/figgis).<br>
+> The new functions are implemented such as **.y4m support** and improved **YUV size detection**. 
+
+## Requirement
+- SDL1 must be installed. (e.g. sudo apt install libsdl1.2-dev)
+
+## UV order
+- In fact, YV12/YV1210 and YVYU/Y42210 have **Y->V->U**.
+- However, YV12/YV1210 and YVYU/Y42210 are treated with the order of **Y->U->V** just like Upstream.
+
+## Features added by this fork
+- **Y4M** file support
+```bash
+    ./yv input.y4m
+```
+- **YUV size detection** logic is added (try without W/H)
+```bash
+    ./yv input176x144.yuv  # read W=176 & H=144 from the file name
+    ./yv input.yuv         # recommend W & H
+    1. 640x360 33 frames YV12
+    2. 176x144 300 frames YV12
+    3. manual
+    select: 2              # select a candidate or input manually
+```
+<br><br>
+
+# Simple YCbCr-Viewer (YUV)
 
 Supports the following formats:
 
 - YV12
 - IYUV
-- YUVY
-- UYVY
 - YUY2
+- UYVY
+- YVYU
 - YV1210
 - Y42210
 
@@ -23,8 +50,7 @@ Basically, because that's whats SDL supports.
 Other YCbCr (YUV) formats are simple to add as long as
 they are 4:2:0 or 4:2:2 8-bpp...
 
-Features
---------
+## Features
 
 - Play
 - Pause
@@ -52,8 +78,7 @@ Features
 - Histogram for the different color planes, per frame
   as csv-data to stdout (for now at least)
 
-Usage
------
+## Usage
 
     ./yv filename width height format
     ./yv foreman_cif.yuv 352 288 YV12
@@ -78,8 +103,7 @@ PSNR value is written to stdout):
     ./yv filename width height format diff_file
     ./yv foreman_cif.yuv 352 288 YV12 foreman_filtered_cif.yuv
 
-Supported commands
-------------------
+## Supported commands
 
     SPACE - Play clip
     RIGHT - Single step 1 frame forward
@@ -100,7 +124,6 @@ Supported commands
     F2 - SLAVE-mode
     F3 - NONE-mode, i.e. disable MASTER/SLAVE-mode
 
-Disclaimer
-----------
+## Disclaimer
 
 Only verified on a Linux based system...
