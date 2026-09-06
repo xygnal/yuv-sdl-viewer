@@ -42,6 +42,9 @@ Uint32 read_422(void);
 Uint32 read_y42210(void);
 Uint32 read_yv1210(void);
 Uint32 allocate_memory(void);
+void free_memory(void);
+int is_planar(void);
+void present_frame(void);
 void draw_grid422(void);
 void draw_grid420(void);
 void luma_only(void);
@@ -68,16 +71,25 @@ Uint32 event_dispatcher(void);
 Uint32 event_loop(void);
 Uint32 parse_input(int argc, char **argv);
 Uint32 sdl_init(void);
+void sdl_cleanup(void);
 void set_caption(char *array, Uint32 frame, Uint32 bytes);
 void set_zoom_rect(void);
 void histogram(void);
 Uint32 ten2eight(Uint8* src, Uint8* dst, Uint32 length);
 
-SDL_Surface *screen;
+SDL_Window *window = NULL;
+SDL_Renderer *renderer = NULL;
+SDL_Texture *texture = NULL;
 SDL_Event event;
-SDL_Rect video_rect;
-SDL_Overlay *my_overlay;
-const SDL_VideoInfo* info = NULL;
+
+/* CPU-side display buffers (effects are applied here, then uploaded) */
+static Uint8 *disp_y = NULL;   /* planar Y */
+static Uint8 *disp_cb = NULL;  /* planar Cb (U) */
+static Uint8 *disp_cr = NULL;  /* planar Cr (V) */
+static Uint8 *disp_raw = NULL; /* packed 4:2:2 */
+static int disp_y_pitch = 0;
+static int disp_c_pitch = 0;
+static int disp_raw_pitch = 0;
 Uint32 FORMAT = YV12;
 FILE* fd;
 
@@ -116,9 +128,7 @@ struct param {
     Uint8* cr_data;           /* pointer towards croma-data */
     char* filename;           /* obvious */
     char* fname_diff;         /* see above */
-    Uint32 overlay_format;    /* YV12, IYUV, YUY2, UYVY or YVYU - SDL */
-    Uint32 vflags;            /* HW support or SW support */
-    Uint8 bpp;                /* bits per pixel */
+    Uint32 overlay_format;    /* SDL pixel format: YV12, IYUV, YUY2, UYVY or YVYU */
     Uint32 mode;              /* MASTER, SLAVE or NONE - defaults to NONE */
     struct my_msgbuf buf;
     int msqid;
@@ -289,7 +299,50 @@ Uint32 allocate_memory(void)
         fprintf(stderr, "Error allocating memory...\n");
         return 0;
     }
+
+    if (is_planar()) {
+        disp_y = malloc(sizeof(Uint8) * P.y_size);
+        disp_cb = malloc(sizeof(Uint8) * P.cb_size);
+        disp_cr = malloc(sizeof(Uint8) * P.cr_size);
+        if (!disp_y || !disp_cb || !disp_cr) {
+            fprintf(stderr, "Error allocating memory...\n");
+            return 0;
+        }
+        disp_y_pitch = (int)P.width;
+        disp_c_pitch = (int)P.width / 2;
+    } else {
+        disp_raw = malloc(sizeof(Uint8) * P.frame_size);
+        if (!disp_raw) {
+            fprintf(stderr, "Error allocating memory...\n");
+            return 0;
+        }
+        disp_raw_pitch = (int)P.width * 2;
+    }
     return 1;
+}
+
+void free_memory(void)
+{
+    free(P.raw); P.raw = NULL;
+    free(P.y_data); P.y_data = NULL;
+    free(P.cb_data); P.cb_data = NULL;
+    free(P.cr_data); P.cr_data = NULL;
+    free(disp_y); disp_y = NULL;
+    free(disp_cb); disp_cb = NULL;
+    free(disp_cr); disp_cr = NULL;
+    free(disp_raw); disp_raw = NULL;
+}
+
+int is_planar(void)
+{
+    return (FORMAT == YV12 || FORMAT == IYUV || FORMAT == YV1210);
+}
+
+void present_frame(void)
+{
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderPresent(renderer);
 }
 
 void draw_grid422(void)
@@ -301,15 +354,15 @@ void draw_grid422(void)
     /* horizontal grid lines */
     for (Uint32 y = 0; y < P.height; y += 16) {
         for (Uint32 x = P.grid_start_pos; x < P.width * 2; x += 16) {
-            *(my_overlay->pixels[0] + y * my_overlay->pitches[0] + x) = 0xF0;
-            *(my_overlay->pixels[0] + y * my_overlay->pitches[0] + x + 8) = 0x20;
+            *(disp_raw + y * disp_raw_pitch + x) = 0xF0;
+            *(disp_raw + y * disp_raw_pitch + x + 8) = 0x20;
         }
     }
     /* vertical grid lines */
     for (Uint32 x = P.grid_start_pos; x < P.width * 2; x += 32) {
         for (Uint32 y = 0; y < P.height; y += 8) {
-            *(my_overlay->pixels[0] + y * my_overlay->pitches[0] + x) = 0xF0;
-            *(my_overlay->pixels[0] + (y + 4) * my_overlay->pitches[0] + x) = 0x20;
+            *(disp_raw + y * disp_raw_pitch + x) = 0xF0;
+            *(disp_raw + (y + 4) * disp_raw_pitch + x) = 0x20;
         }
     }
 }
@@ -323,15 +376,15 @@ void draw_grid420(void)
     /* horizontal grid lines */
     for (Uint32 y = 0; y < P.height; y += 16) {
         for (Uint32 x = 0; x < P.width; x += 8) {
-            *(my_overlay->pixels[0] + y * my_overlay->pitches[0] + x) = 0xF0;
-            *(my_overlay->pixels[0] + y * my_overlay->pitches[0] + x + 4) = 0x20;
+            *(disp_y + y * disp_y_pitch + x) = 0xF0;
+            *(disp_y + y * disp_y_pitch + x + 4) = 0x20;
         }
     }
     /* vertical grid lines */
     for (Uint32 x = 0; x < P.width; x += 16) {
         for (Uint32 y = 0; y < P.height; y += 8) {
-            *(my_overlay->pixels[0] + y * my_overlay->pitches[0] + x) = 0xF0;
-            *(my_overlay->pixels[0] + (y + 4) * my_overlay->pitches[0] + x) = 0x20;
+            *(disp_y + y * disp_y_pitch + x) = 0xF0;
+            *(disp_y + (y + 4) * disp_y_pitch + x) = 0x20;
         }
     }
 }
@@ -342,19 +395,19 @@ void luma_only(void)
         return;
     }
 
-    if (FORMAT == YV12 || FORMAT == IYUV || FORMAT == YV1210) {
+    if (is_planar()) {
         /* Set croma part to 0x80 */
-        for (Uint32 i = 0; i < P.cr_size; i++) my_overlay->pixels[1][i] = 0x80;
-        for (Uint32 i = 0; i < P.cb_size; i++) my_overlay->pixels[2][i] = 0x80;
+        memset(disp_cb, 0x80, P.cb_size);
+        memset(disp_cr, 0x80, P.cr_size);
         return;
     }
 
     /* YUY2, UYVY, YVYU */
     for (Uint32 i = P.cb_start_pos; i < P.frame_size; i += 4) {
-        *(my_overlay->pixels[0] + i) = 0x80;
+        *(disp_raw + i) = 0x80;
     }
     for (Uint32 i = P.cr_start_pos; i < P.frame_size; i += 4) {
-        *(my_overlay->pixels[0] + i) = 0x80;
+        *(disp_raw + i) = 0x80;
     }
 }
 
@@ -364,19 +417,19 @@ void cb_only(void)
         return;
     }
 
-    if (FORMAT == YV12 || FORMAT == IYUV || FORMAT == YV1210) {
+    if (is_planar()) {
         /* Set Luma part and Cr to 0x80 */
-        for (Uint32 i = 0; i < P.y_size; i++) my_overlay->pixels[0][i] = 0x80;
-        for (Uint32 i = 0; i < P.cr_size; i++) my_overlay->pixels[1][i] = 0x80;
+        memset(disp_y, 0x80, P.y_size);
+        memset(disp_cr, 0x80, P.cr_size);
         return;
     }
 
     /* YUY2, UYVY, YVYU */
     for (Uint32 i = P.y_start_pos; i < P.frame_size; i += 2) {
-        *(my_overlay->pixels[0] + i) = 0x80;
+        *(disp_raw + i) = 0x80;
     }
     for (Uint32 i = P.cr_start_pos; i < P.frame_size; i += 4) {
-        *(my_overlay->pixels[0] + i) = 0x80;
+        *(disp_raw + i) = 0x80;
     }
 }
 
@@ -386,42 +439,49 @@ void cr_only(void)
         return;
     }
 
-    if (FORMAT == YV12 || FORMAT == IYUV || FORMAT == YV1210) {
+    if (is_planar()) {
         /* Set Luma part and Cb to 0x80 */
-        for (Uint32 i = 0; i < P.y_size; i++) my_overlay->pixels[0][i] = 0x80;
-        for (Uint32 i = 0; i < P.cb_size; i++) my_overlay->pixels[2][i] = 0x80;
+        memset(disp_y, 0x80, P.y_size);
+        memset(disp_cb, 0x80, P.cb_size);
         return;
     }
 
     /* YUY2, UYVY, YVYU */
     for (Uint32 i = P.y_start_pos; i < P.frame_size; i += 2) {
-        *(my_overlay->pixels[0] + i) = 0x80;
+        *(disp_raw + i) = 0x80;
     }
     for (Uint32 i = P.cb_start_pos; i < P.frame_size; i += 4) {
-        *(my_overlay->pixels[0] + i) = 0x80;
+        *(disp_raw + i) = 0x80;
     }
 }
 
 void draw_420(void)
 {
-    memcpy(my_overlay->pixels[0], P.y_data, P.y_size);
-    memcpy(my_overlay->pixels[1], P.cr_data, P.cr_size);
-    memcpy(my_overlay->pixels[2], P.cb_data, P.cb_size);
+    memcpy(disp_y, P.y_data, P.y_size);
+    memcpy(disp_cb, P.cb_data, P.cb_size);
+    memcpy(disp_cr, P.cr_data, P.cr_size);
     draw_grid420();
     luma_only();
     cb_only();
     cr_only();
     histogram();
+    SDL_UpdateYUVTexture(texture, NULL,
+                         disp_y, disp_y_pitch,
+                         disp_cb, disp_c_pitch,
+                         disp_cr, disp_c_pitch);
+    present_frame();
 }
 
 void draw_422(void)
 {
-    memcpy(my_overlay->pixels[0], P.raw, P.frame_size);
+    memcpy(disp_raw, P.raw, P.frame_size);
     draw_grid422();
     luma_only();
     cb_only();
     cr_only();
     histogram();
+    SDL_UpdateTexture(texture, NULL, disp_raw, disp_raw_pitch);
+    present_frame();
 }
 
 void usage(char* name)
@@ -477,15 +537,8 @@ void (*drawer[])(void) = {draw_420, draw_420, draw_422, draw_422, draw_422, draw
 
 void draw_frame(void)
 {
-    SDL_LockYUVOverlay(my_overlay);
-    (*drawer[FORMAT])();
     set_zoom_rect();
-    video_rect.x = 0;
-    video_rect.y = 0;
-    video_rect.w = P.zoom_width;
-    video_rect.h = P.zoom_height;
-    SDL_UnlockYUVOverlay(my_overlay);
-    SDL_DisplayYUVOverlay(my_overlay, &video_rect);
+    (*drawer[FORMAT])();
 }
 
 Uint32 read_frame(void)
@@ -601,9 +654,9 @@ void histogram(void)
         return;
     }
 
-    Uint8 y[256] = {0};
-    Uint8 b[256] = {0};
-    Uint8 r[256] = {0};
+    unsigned int y[256] = {0};
+    unsigned int b[256] = {0};
+    unsigned int r[256] = {0};
 
     for (Uint32 i = 0; i < P.y_size; i++) y[P.y_data[i]]++;
     for (Uint32 i = 0; i < P.cb_size; i++) b[P.cb_data[i]]++;
@@ -664,6 +717,8 @@ void setup_param(void)
         P.cb_start_pos = 3;
         P.cr_start_pos = 1;
     }
+
+    set_zoom_rect();
 }
 
 void check_input(void)
@@ -883,7 +938,7 @@ Uint32 event_loop(void)
     while (!quit) {
 
         set_caption(caption, frame, 256);
-        SDL_WM_SetCaption(caption, NULL);
+        SDL_SetWindowTitle(window, caption);
 
         /* wait for SDL event */
         if (P.mode == NONE || P.mode == MASTER) {
@@ -904,7 +959,7 @@ Uint32 event_loop(void)
                         while (play_yuv) {
                             start_ticks = SDL_GetTicks();
                             set_caption(caption, frame, 256);
-                            SDL_WM_SetCaption( caption, NULL );
+                            SDL_SetWindowTitle(window, caption);
 
                             /* check for next frame existing */
                             if (read_frame()) {
@@ -949,23 +1004,15 @@ Uint32 event_loop(void)
                     case SDLK_UP: /* zoom in */
                         P.zoom++;
                         set_zoom_rect();
-                        screen = SDL_SetVideoMode(P.zoom_width,
-                                                  P.zoom_height,
-                                                  P.bpp, P.vflags);
-                        video_rect.w = P.zoom_width;
-                        video_rect.h = P.zoom_height;
-                        SDL_DisplayYUVOverlay(my_overlay, &video_rect);
+                        SDL_SetWindowSize(window, P.zoom_width, P.zoom_height);
+                        present_frame();
                         send_message(ZOOM_IN);
                         break;
                     case SDLK_DOWN: /* zoom out */
                         P.zoom--;
                         set_zoom_rect();
-                        screen = SDL_SetVideoMode(P.zoom_width,
-                                                  P.zoom_height,
-                                                  P.bpp, P.vflags);
-                        video_rect.w = P.zoom_width;
-                        video_rect.h = P.zoom_height;
-                        SDL_DisplayYUVOverlay(my_overlay, &video_rect);
+                        SDL_SetWindowSize(window, P.zoom_width, P.zoom_height);
+                        present_frame();
                         send_message(ZOOM_OUT);
                         break;
                     case SDLK_r: /* rewind */
@@ -1052,8 +1099,10 @@ Uint32 event_loop(void)
             case SDL_QUIT:
                 quit = 1;
                 break;
-            case SDL_VIDEOEXPOSE:
-                SDL_DisplayYUVOverlay(my_overlay, &video_rect);
+            case SDL_WINDOWEVENT:
+                if (event.window.event == SDL_WINDOWEVENT_EXPOSED) {
+                    present_frame();
+                }
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 /* If the left mouse button was pressed */
@@ -1092,27 +1141,27 @@ Uint32 parse_input(int argc, char **argv)
         P.height = atoi(argv[3]);
 
         if (!strncasecmp(argv[4], "YV1210", 6)) {
-            P.overlay_format = SDL_YV12_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_YV12;
             FORMAT = YV1210;
             P.bytes_pel = 2;
         } else if (!strncasecmp(argv[4], "YV12", 4)) {
-            P.overlay_format = SDL_YV12_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_YV12;
             FORMAT = YV12;
         } else if (!strncasecmp(argv[4], "IYUV", 4)) {
-            P.overlay_format = SDL_IYUV_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_IYUV;
             FORMAT = IYUV;
         } else if (!strncasecmp(argv[4], "YUY2", 4)) {
-            P.overlay_format = SDL_YUY2_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_YUY2;
             FORMAT = YUY2;
         } else if (!strncasecmp(argv[4], "UYVY", 4)) {
-            P.overlay_format = SDL_UYVY_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_UYVY;
             FORMAT = UYVY;
         } else if (!strncasecmp(argv[4], "YVYU", 4)) {
-            P.overlay_format = SDL_YVYU_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_YVYU;
             FORMAT = YVYU;
         } else if (!strncasecmp(argv[4], "Y42210", 6)) {
             /* No support for 422, display it as YVYU */
-            P.overlay_format = SDL_YVYU_OVERLAY;
+            P.overlay_format = SDL_PIXELFORMAT_YVYU;
             FORMAT = Y42210;
             P.bytes_pel = 2;
         } else {
@@ -1248,7 +1297,7 @@ Uint32 parse_input(int argc, char **argv)
         P.width = hdr_w;
         P.height = hdr_h;
         FORMAT = clr_idx;
-        P.overlay_format = ((clr_idx == YV12 || clr_idx == YV1210) ? SDL_YV12_OVERLAY : SDL_YVYU_OVERLAY);
+        P.overlay_format = ((clr_idx == YV12 || clr_idx == YV1210) ? SDL_PIXELFORMAT_YV12 : SDL_PIXELFORMAT_YVYU);
         if (clr_idx == YV1210 || clr_idx == Y42210)
             P.bytes_pel = 2;
         if (argc == 3) {
@@ -1320,38 +1369,60 @@ Uint32 sdl_init(void)
 {
     /* SDL init */
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        fprintf(stderr, "Unable to set video mode: %s\n", SDL_GetError());
-        atexit(SDL_Quit);
+        fprintf(stderr, "Unable to init SDL: %s\n", SDL_GetError());
         return 0;
     }
 
-    info = SDL_GetVideoInfo();
-    if (!info) {
-        fprintf(stderr, "SDL ERROR Video query failed: %s\n", SDL_GetError());
+    window = SDL_CreateWindow("yv",
+                              SDL_WINDOWPOS_UNDEFINED,
+                              SDL_WINDOWPOS_UNDEFINED,
+                              (int)P.width, (int)P.height,
+                              SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        fprintf(stderr, "SDL ERROR Window creation failed: %s\n", SDL_GetError());
         SDL_Quit();
         return 0;
     }
 
-    P.bpp = info->vfmt->BitsPerPixel;
-
-    if (info->hw_available){
-        P.vflags = SDL_HWSURFACE;
-    } else {
-        P.vflags = SDL_SWSURFACE;
-    }
-
-    if ((screen = SDL_SetVideoMode(P.width, P.height, P.bpp, P.vflags)) == 0) {
-        fprintf(stderr, "SDL ERROR Video mode set failed: %s\n", SDL_GetError());
+    renderer = SDL_CreateRenderer(window, -1, 0);
+    if (!renderer) {
+        fprintf(stderr, "SDL ERROR Renderer creation failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(window);
+        window = NULL;
         SDL_Quit();
         return 0;
     }
 
-    my_overlay = SDL_CreateYUVOverlay(P.width, P.height, P.overlay_format, screen);
-    if (!my_overlay) {
-        fprintf(stderr, "Couldn't create overlay\n");
+    texture = SDL_CreateTexture(renderer, P.overlay_format,
+                                SDL_TEXTUREACCESS_STREAMING,
+                                (int)P.width, (int)P.height);
+    if (!texture) {
+        fprintf(stderr, "Couldn't create texture: %s\n", SDL_GetError());
+        SDL_DestroyRenderer(renderer);
+        renderer = NULL;
+        SDL_DestroyWindow(window);
+        window = NULL;
+        SDL_Quit();
         return 0;
     }
     return 1;
+}
+
+void sdl_cleanup(void)
+{
+    if (texture) {
+        SDL_DestroyTexture(texture);
+        texture = NULL;
+    }
+    if (renderer) {
+        SDL_DestroyRenderer(renderer);
+        renderer = NULL;
+    }
+    if (window) {
+        SDL_DestroyWindow(window);
+        window = NULL;
+    }
+    SDL_Quit();
 }
 
 int main(int argc, char** argv)
@@ -1373,6 +1444,7 @@ int main(int argc, char** argv)
     }
 
     if (!open_input()) {
+        sdl_cleanup();
         return EXIT_FAILURE;
     }
 
@@ -1394,11 +1466,8 @@ int main(int argc, char** argv)
 
 cleanup:
     destroy_message_queue();
-    SDL_FreeYUVOverlay(my_overlay);
-    free(P.raw);
-    free(P.y_data);
-    free(P.cb_data);
-    free(P.cr_data);
+    free_memory();
+    sdl_cleanup();
     if (fd) {
         fclose(fd);
     }

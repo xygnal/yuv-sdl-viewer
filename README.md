@@ -4,7 +4,7 @@
 > The new functions are implemented such as **.y4m support** and improved **YUV size detection**. 
 
 ## Requirement
-- SDL1 must be installed. (e.g. sudo apt install libsdl1.2-dev)
+- SDL2 must be installed. (e.g. sudo apt install libsdl2-dev)
 
 ## UV order
 - In fact, YV12/YV1210 and YVYU/Y42210 have **Y->V->U**.
